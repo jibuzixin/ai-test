@@ -298,6 +298,32 @@ dir   .venv
 | 端到端：假 SSE 把代理对拆两片下发 | ✅ 终端打印 `先给你个表情😀 收工`，第二轮请求正常 |
 | 端到端：会话文件内容 | ✅ 存的是 `'先给你个表情😀 收工'`（干净文本） |
 
+### 补充：v6 的兜底其实没生效（v7 修复）
+
+用户实测在 `/exit` 时仍然崩：
+
+```
+UnicodeEncodeError: 'utf-8' codec can't encode characters in position 1531-1532: surrogates not allowed
+```
+
+原因：**v6 的 try/except 包错了位置**。我以为 `json.dumps(..., ensure_ascii=False)` 会抛
+`UnicodeEncodeError`，其实**不会** —— 它只是把落单代理对原样留在返回的 str 里，
+真正报错的是后面 `path.write_text(text, encoding="utf-8")` 编码 UTF-8 的那一刻。
+所以那层"退回 ascii 转义"的兜底从来没被执行到。
+
+另外还有一个**没被注意到的入口**：`load_session()` 读老会话文件时没有清洗，
+脏数据从磁盘 → 内存 → 再存盘，整条链路都会带着雷。
+
+v7 修复：
+
+| 位置 | 改动 |
+| --- | --- |
+| `session.py` 新增 `_sanitize()` | 递归清洗 payload 里所有字符串（成对代理合并，落单替换 U+FFFD） |
+| `save_session()` | 存盘前清洗整个 payload；`write_text` 外层加真正的兜底（编码不了就退回 ascii 转义保存，会话不丢） |
+| `load_session()` | 读进来就地清洗，老会话文件的脏数据不再进内存 |
+
+实测：造一个含 `\ud83d` 的脏会话文件 → 加载 → 正常对话 → `/exit` → 保存成功，不再抛栈。
+
 ### 附带修复的隐患
 
 `_parse_docstring` / 流式分片解析在遇到 `json.JSONDecodeError` 时会 `continue`（跳过该行）。
