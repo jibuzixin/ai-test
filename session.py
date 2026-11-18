@@ -24,6 +24,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+import textsafe
+
 BASE_DIR = Path(__file__).resolve().parent
 SESSIONS_DIR = BASE_DIR / "sessions"
 
@@ -38,6 +40,17 @@ def session_path(session_id: str, sessions_dir: Path | None = None) -> Path:
     return base / f"{session_id}.json"
 
 
+def _sanitize(value: Any) -> Any:
+    """递归清洗字符串里的落单代理对，保证能安全编码成 UTF-8。"""
+    if isinstance(value, str):
+        return textsafe.clean(value)
+    if isinstance(value, dict):
+        return {k: _sanitize(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_sanitize(v) for v in value]
+    return value
+
+
 def save_session(
     session_id: str,
     messages: list[dict[str, Any]],
@@ -50,20 +63,22 @@ def save_session(
     path = session_path(session_id, sessions_dir)
     path.parent.mkdir(parents=True, exist_ok=True)
     now = datetime.now().astimezone().isoformat(timespec="seconds")
-    payload = {
-        "id": session_id,
-        "created_at": now,
-        "updated_at": now,
-        "model": model,
-        "system_prompt": system_prompt,
-        "messages": messages,
-    }
+    payload = _sanitize(
+        {
+            "id": session_id,
+            "created_at": now,
+            "updated_at": now,
+            "model": model,
+            "system_prompt": system_prompt,
+            "messages": messages,
+        }
+    )
+    text = json.dumps(payload, ensure_ascii=False, indent=2)
     try:
-        text = json.dumps(payload, ensure_ascii=False, indent=2)
-    except (UnicodeEncodeError, ValueError):
-        # 极端情况：数据里有无法编码的字符，退回 ascii 转义保存，保证不丢会话
-        text = json.dumps(payload, ensure_ascii=True, indent=2)
-    path.write_text(text, encoding="utf-8")
+        path.write_text(text, encoding="utf-8")
+    except UnicodeEncodeError:
+        # 最后一道兜底：退回 ascii 转义保存，保证会话不丢
+        path.write_text(json.dumps(payload, ensure_ascii=True, indent=2), encoding="utf-8")
     return path
 
 
@@ -76,7 +91,8 @@ def load_session(path: str | Path) -> dict[str, Any]:
             p = candidate
         else:
             raise FileNotFoundError(f"会话文件不存在: {path}")
-    return json.loads(p.read_text(encoding="utf-8"))
+    # 老会话文件里可能已经存了落单代理对，读进来先清洗
+    return _sanitize(json.loads(p.read_text(encoding="utf-8")))
 
 
 def list_sessions(sessions_dir: Path | None = None) -> list[Path]:
